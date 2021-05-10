@@ -1,0 +1,74 @@
+public class RedirectController {
+	
+    public static String redirectUrl;
+    public static String authcode;
+    public class deserializeResponse
+    {
+        public String id;
+        public String access_token;
+    }
+    public RedirectController() {
+       
+      system.debug('URL '+ApexPages.currentPage().getURL());
+        system.debug('auth '+ApexPages.currentPage().getURL().split('code=')[1]);
+        system.debug('redirectUrl '+ApexPages.currentPage().getHeaders().get('referer'));
+        redirectUrl=ApexPages.currentPage().getHeaders().get('referer');
+        authcode=ApexPages.currentPage().getURL().split('code=')[1];
+        authcode=authcode.replace('%3D%3D', '==');
+        system.debug('authcode replace'+authcode);
+    }
+    public void insertauth()
+        {
+           
+			String clientId='3MVG96mGXeuuwTZgYskh3rLKXGJuwthrV_vEJmPtzbixhYFOas8xx7g4D9LJHOOMTsRV59T1Q9JHNtksRg9s5';
+			String clientSecret='5052F8A41F7005AC6D3DF39C7DF5052892B814370E5474D4C268150BE426D9E3';
+			String redirectUri=redirectUrl;
+            //Kazi code
+            //String reqbody  = 'grant_type=authorization_code'+'&code='+authcode + '&clientId='+clientId +'&clientSecret='+clientSecret +'&redirectUri=https://daimlereu--onecrmdev--c.cs84.visual.force.com/apex/RedirectingPage';
+            //String endPoint = redirectUrl+'services/apexrest/v1/getAccounts1';
+            String reqbody  = 'grant_type=authorization_code'+'&code='+authcode + '&client_id='+clientId +'&client_secret='+clientSecret +'&redirect_uri=https://daimlereu--onecrmdev--c.cs84.visual.force.com/apex/RedirectingPage';
+           
+              // Http h = new Http();
+        
+       		 HttpRequest req = new HttpRequest();
+            //req.setHeader('Content-type','application/x-www-form-urlencoded' );
+            system.debug('reqbody '+reqbody);
+        	req.setBody(reqbody);
+        	req.setMethod('POST');
+            req.setEndpoint('https://test.salesforce.com/services/oauth2/token');
+            Http h2 = new Http();
+            HttpResponse res = h2.send(req);
+            
+            deserializeResponse response = (deserializeResponse)JSON.deserialize(res.getbody(),deserializeResponse.class);
+            system.debug('rresponecode=='+res);
+            system.debug('rresponBodyCode=='+res.getBody());
+        	system.debug('@@@@accessToken@@'+response );
+            
+           /* AuthInfo__c auth=new AuthInfo__c();
+            auth.AccessToken__c=resphttps://daimlereu--onecrmdev.my.salesforce.com/s.gifonse.accessToken;
+            auth.EndURL__c=redirectUrl;
+            insert auth; */
+        
+            
+            List<Data_Migration_pe__e> dmpe=new List<Data_Migration_pe__e>();
+        string endpoint=redirectUrl;
+        string accesstoken=response.access_token;
+        system.debug('from redirect controller access tokern '+accesstoken);
+            dmpe.add(new Data_Migration_pe__e(Endpoint__c=endpoint,Access_Token__c=accesstoken));
+            
+            //dmpe.Access_Token__c=response.accessToken;
+            
+            
+           List<Database.SaveResult> results = EventBus.publish(dmpe);
+            System.debug('****results'+results);
+            for (Database.SaveResult result : results) {
+                if (!result.isSuccess()) {
+                    for (Database.Error error : result.getErrors()) {
+                        System.debug('Error returned: ' +
+                                     error.getStatusCode() +' - '+
+                                     error.getMessage());
+                    }
+                }
+            }
+        }
+}
