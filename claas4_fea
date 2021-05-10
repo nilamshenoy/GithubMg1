@@ -1,0 +1,950 @@
+public without sharing class AccountRecordTypeController {
+
+    private static final Id PERSON_ACC_RECORDTYPE_ID = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('PersonAccount').getRecordTypeId();
+    private static final Id COMPANY_ACC_RECORDTYPE_ID = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('Business_Account').getRecordTypeId();
+    private static final Id FORSHARINGRECORDTYPEID = Schema.SObjectType.Account_Organization_Relationship__c.getRecordTypeInfosByDeveloperName().get('ForSharing').getRecordTypeId(); //added as part of CRM-9903
+    public static List<Core_Market_Level_Handler__mdt> marketLevelHandlerList = [select Core_Allowed_Markets__c,Core_By_Passed_Markets__c, DeveloperName  from Core_Market_Level_Handler__mdt where
+                                                                                 Core_Component_Type__c='Apex Class' and Core_Object_Name_Class__c ='AccountRecordTypeController'];
+    public static Map<string, string> marketLevelCheckPointToAllowedMarketMap = UtilityClass.populateMarketLevelHandlerMap(marketLevelHandlerList);
+    public static Map<string, string> marketLevelCheckPointToByPassedMarketMap = UtilityClass.populateMarketLevelHandlerMapForByPassedMarkets(marketLevelHandlerList);
+    @AuraEnabled
+    public static List < RecordType > fetchRecordTypeValues() {
+        Id currentProfileId = userinfo.getProfileId(); 
+        String currentProfileName = [SELECT Id, Name FROM Profile WHERE Id = :currentProfileId].Name;
+        List < RecordType > rtNames = new List < RecordType > ();
+        List < RecordType > rtQueriedNames = new List < RecordType > ();
+        rtQueriedNames = [SELECT Id, Name, DeveloperName FROM RecordType WHERE IsActive = TRUE AND SobjectType = 'Account' LIMIT 10];
+
+        if (currentProfileName.equalsIgnoreCase(System.Label.System_Administrator)) {          // set all record type for admin
+            for (RecordType rt: rtQueriedNames) {
+                rtNames.add(rt);
+            }
+        }
+        else if(currentProfileName.equalsIgnoreCase(System.Label.CORE_Profile_Technical_User)){
+             for (RecordType rt: rtQueriedNames) {                               // set record type person/company only 
+                if (rt.DeveloperName != System.Label.CORE_Retail_Master_Data && rt.DeveloperName != System.Label.CORE_Person_Account_Duplicate) {
+                    rtNames.add(rt);
+                }
+            }
+        }
+         else {
+            for (RecordType rt: rtQueriedNames) {                               // set record type person, company only 
+                if (rt.DeveloperName != System.Label.CORE_Retail_Master_Data  && rt.DeveloperName != System.Label.CORE_Person_Account_Duplicate  && rt.DeveloperName !=Constant_Variable.CORE_READONLY_MANUAL_DELETION  && rt.DeveloperName !=System.Label.CORE_Company_Read_Only ) {
+                    rtNames.add(rt);
+                }
+            }
+        }
+        return rtNames;
+    }
+
+
+    @AuraEnabled
+    public static Id getClaimingOrgs() {
+
+        Id userId = UserInfo.getUserId();
+        List < User_Organization_Relationship__c > userOrgRelList = new List < User_Organization_Relationship__c > ();
+        User_Organization_Relationship__c userOrgRelObj = new User_Organization_Relationship__c();
+        if (userId != null) {
+            userOrgRelList = [SELECT Id, CORE_User__c
+                FROM User_Organization_Relationship__c
+                WHERE CORE_User__c =: userId
+                AND CORE_UOR_Type__c='Primary' LIMIT 50000 ];
+            if (userOrgRelList.size() == 1) {
+                userOrgRelObj = userOrgRelList[0];
+                return userOrgRelObj.Id;
+            } 
+        }
+        return null;
+    }
+    /*
+*sprint 10/US 1539 change logic of searching records based upon user input
+if user enter claming org , email or phone or home phone fields then it search in salesforce internal and 
+check whether claming org has access of reocrds in Aor object then it shows in table 
+*/
+    @AuraEnabled
+    public static AccountWrapper searchAccountApex(Account acc) {
+        
+        Set < Id > accountIdSet = new Set < Id > ();
+        List < string > conditions = new List < string > ();
+        List < Account > accountsList = new List < Account > ();
+        List < Account > finalAccountsList = new List < Account > ();
+        Map < string, Account_Organization_Relationship__c > accountOrgRelMap = new Map < string, Account_Organization_Relationship__c > ();
+        User_Organization_Relationship__c uorObj = null;
+        string GCID;
+        
+        
+        
+    try{
+        //added CORE_Organization_CompanyID__c in query as part of CRM 9905
+         uorObj=[SELECT Id, CORE_Organization__c,Organization_MOC__c,
+                                                   CORE_Organization_CompanyID__c, CORE_Organization_Level__c
+                                                   FROM User_Organization_Relationship__c 
+                                                   WHERE Id =: acc.CORE_Claiming_Organization__c LIMIT 1];
+        
+            String query = 'SELECT Id, FirstName, LastName, Name, PersonEmail, PersonMobilePhone, PersonHomePhone,' +
+                ' CORE_Claiming_Organization__c,CORE_Claiming_Organization__r.Organization_MOC__c,CORE_Ecosystem_Data_sharing__c,PersonMailingStreet,PersonMailingCity,PersonMailingState,PersonMailingCountry,PersonMailingCountryCode,' +
+                'CORE_MBID_Mobile__c, PersonMailingAddress,Core_Market_Profile_Setting__c, Core_Market_Profile_Setting__r.Name,CORE_Home_Phone__c, ClaimingOrg__c,' +
+                ' CreatedBy.Id  FROM Account';
+            
+            system.debug('accclaimcompid' +acc.CORE_Claiming_Organization__r.CORE_Organization__r.CORE_CompanyId__c );
+            conditions.clear();
+            
+            conditions.add('RecordTypeId = '+ '\'' + PERSON_ACC_RECORDTYPE_ID +'\'' );
+            system.debug('UOR MOC' +uorObj.Organization_MOC__c);
+          if(uorObj.CORE_Organization__c != NULL && uorObj.Organization_MOC__c != NULL && (!marketLevelCheckPointToByPassedMarketMap.get('Account_AC_Gen_Check_Point_64').contains(uorObj.Organization_MOC__c))){
+           
+                conditions.add('CORE_Claiming_Organization__r.CORE_Organization__r.CORE_CompanyId__c  = '+ '\'' + uorObj.CORE_Organization_CompanyID__c +'\'' );    
+            }
+
+        Boolean isRun = setSearchConditions(acc, conditions,uorObj);
+
+        if (isRun) {
+
+            if (conditions.size() > 0) {
+                query += '  WHERE ' + conditions[0];
+                for (Integer i = 1; i < conditions.size(); i++) {
+                    query += '  AND ' + conditions[i];
+                }
+            }
+            query+=' Limit 50000';
+
+            system.debug('query is ' + query);
+            accountsList = Database.query(query);
+            system.debug('accountsList list is ' + accountsList);
+
+            accountIdSet = setAccountIds(accountsList);
+              /*if(uorObj.Organization_MOC__c != NULL && 
+                marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_65').contains(uorObj.Organization_MOC__c)){
+                    accountOrgRelMap = setAORMap(accountIdSet, System.Label.CORE_MOCSWE_GC);
+                  }*/ 
+               string checkPoint65 ='Account_AC_Gen_Check_Point_65';
+               if(uorObj.Organization_MOC__c != NULL && marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_65').contains(uorObj.Organization_MOC__c))
+               {
+                    GCID = populateMarketProfileSettingMap(checkPoint65, uorObj.Organization_MOC__c);
+                    accountOrgRelMap = setAORMap(accountIdSet, GCID);
+                   
+			} 
+                else{
+                    accountOrgRelMap = setAORMap(accountIdSet, uorObj.CORE_Organization_CompanyID__c);
+                }
+                system.debug('AOR map' +accountOrgRelMap);
+            //CRM-9911 not checking Market as this picklist values are available only for DE market
+            If(uorObj.CORE_Organization_Level__c == System.Label.CORE_OrganizationLevel_Dealer_Group_Own_Retail
+              || uorObj.CORE_Organization_Level__c == System.Label.CORE_OrganizationLevel_Dealer_Own_Retail
+              || uorObj.CORE_Organization_Level__c == System.Label.CORE_OrganizationLevel_Retailer_Location_Own_Retail){
+                finalAccountsList=accountsList;  
+            }
+            else{
+                finalAccountsList = filterAccBasedOnAORRecords(accountsList, accountOrgRelMap);
+            }
+            
+        }
+    }
+    catch(Exception ex){
+        system.debug('exception'+ ex);
+        system.debug('ex'+ex.getLineNumber());
+        system.debug('exception'+ ex.getMessage());
+        UTIL_LoggingService.logHandledException(ex, UserInfo.getOrganizationId(),UserInfo.getOrganizationName(),'AccountRecordTypeController','searchAccountApex','AccountRecordTypeController', system.LoggingLevel.FINEST);
+        
+    }
+        System.debug('at-142' + finalAccountsList);
+        AccountWrapper accWrapper = new AccountWrapper();
+        if(finalAccountsList.size()>0){
+            Account ac1=finalAccountsList[0];
+            accWrapper.mpsofacc=ac1.Core_Market_Profile_Setting__r.Name;
+        }
+        
+        accWrapper.orgLevelOfClaimingOrg = uorObj.CORE_Organization_Level__c;
+        accWrapper.finalAccountsList=finalAccountsList;
+        System.debug('147-finalAccountsList' + accWrapper.finalAccountsList);
+        System.debug('148-orgLevelOfClaimingOrg' + accWrapper.orgLevelOfClaimingOrg);
+        return accWrapper;
+       
+    }
+    
+     @AuraEnabled
+    public static  AccountWrapper searchCompAccountApex(Account acc) {
+        Set < Id > accountIdSet = new Set < Id > ();
+        List < string > conditions = new List < string > ();
+        List < Account > accountsList = new List < Account > ();
+        List < Account > finalAccountsList = new List < Account > ();
+        string GCID;
+        Map < string, Account_Organization_Relationship__c > accountOrgRelMap = new Map < string, Account_Organization_Relationship__c > ();
+        User_Organization_Relationship__c uorObj = null;
+        try{
+            //added CORE_Organization_CompanyID__c in query as part of CRM 9905
+             uorObj=[SELECT Id, CORE_Organization__c,Organization_MOC__c,CORE_Organization_CompanyID__c, CORE_Organization_Level__c 
+                     FROM User_Organization_Relationship__c 
+                     WHERE Id =: acc.CORE_Claiming_Organization__c LIMIT 1];
+            system.debug('UOR ' + uorObj);
+
+            String query = 'SELECT Id, Name, ShippingCity, CORE_E_mail__c, Phone,' +
+                ' CORE_Claiming_Organization__c, CORE_Ecosystem_Data_sharing__c,Core_Market_Profile_Setting__c, Core_Market_Profile_Setting__r.Name, ClaimingOrg__c,' +
+                ' CreatedBy.Id  FROM Account';
+            
+            conditions.clear();
+            
+            conditions.add('RecordTypeId = '+ '\'' + COMPANY_ACC_RECORDTYPE_ID +'\'' );
+            system.debug('CoreOrg@176 ' + uorObj.CORE_Organization__c);
+            if(uorObj.CORE_Organization__c != NULL && uorObj.Organization_MOC__c != NULL && marketLevelCheckPointToByPassedMarketMap.get('Account_AC_Gen_Check_Point_66').contains(uorObj.Organization_MOC__c)){
+
+                conditions.add('CORE_Claiming_Organization__r.CORE_Organization__r.CORE_CompanyId__c  = '+ '\'' + uorObj.CORE_Organization_CompanyID__c +'\'' );    
+            }
+            
+            
+            Boolean isRun = setCompSearchConditions(acc, conditions, uorObj);
+            
+            if (isRun) {
+                
+                if (conditions.size() > 0) {
+                    query += '  WHERE ' + conditions[0];
+                    for (Integer i = 1; i < conditions.size(); i++) {
+                        query += '  AND ' + conditions[i];
+                    }
+                }
+                query+=' Limit 50000';
+                system.debug('Query ' + query);
+            
+                accountsList = Database.query(query);
+                accountIdSet = setAccountIds(accountsList);
+                system.debug('accountsList@200'+ accountsList.size());
+                System.debug('accountIdSet@200' + accountIdSet);
+            
+                /*if(uorObj.CORE_Organization__c != NULL && uorObj.Organization_MOC__c != NULL && marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_67').contains(uorObj.Organization_MOC__c)){    
+                    accountOrgRelMap = setAORMap(accountIdSet, System.Label.CORE_MOCSWE_GC);
+                }*/
+                string checkPoint67 ='Account_AC_Gen_Check_Point_67';
+                  if(uorObj.Organization_MOC__c != NULL && marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_67').contains(uorObj.Organization_MOC__c)){
+                     
+                    GCID = populateMarketProfileSettingMap(checkPoint67, uorObj.Organization_MOC__c);
+                    accountOrgRelMap = setAORMap(accountIdSet, GCID);
+					}
+                else{
+                    accountOrgRelMap = setAORMap(accountIdSet, uorObj.CORE_Organization_CompanyID__c);
+                }
+                System.debug('accountOrgRelMap@203' + accountOrgRelMap);
+            //CRM-9911 not checking Market as this picklist values are available only for DE market
+            If(uorObj.CORE_Organization_Level__c == System.Label.CORE_OrganizationLevel_Dealer_Group_Own_Retail
+              || uorObj.CORE_Organization_Level__c == System.Label.CORE_OrganizationLevel_Dealer_Own_Retail
+              || uorObj.CORE_Organization_Level__c == System.Label.CORE_OrganizationLevel_Retailer_Location_Own_Retail){
+                System.debug('Inside IF@207');
+                  
+                  finalAccountsList=accountsList;  
+                  System.debug('finalAccountsList@210'+ finalAccountsList.size());
+            }
+            else{
+                
+                finalAccountsList = filterAccBasedOnAORRecords(accountsList, accountOrgRelMap);
+                System.debug('finalAccountsList@214'+ finalAccountsList);
+            }
+                
+            }
+        }
+        catch(Exception ex){
+            UTIL_LoggingService.logHandledException(ex, UserInfo.getOrganizationId(),UserInfo.getOrganizationName(),'AccountRecordTypeController','searchCompAccountApex','AccountRecordTypeController', system.LoggingLevel.FINEST);
+            
+        }
+        
+        System.debug('@224-Final Acc list1' + finalAccountsList);
+        AccountWrapper accWrapper = new AccountWrapper();
+		if(finalAccountsList.size()>0){
+            Account ac1=finalAccountsList[0];
+            accWrapper.mpsofacc=ac1.Core_Market_Profile_Setting__r.Name;
+        }
+        accWrapper.orgLevelOfClaimingOrg = uorObj.CORE_Organization_Level__c;
+        accWrapper.finalAccountsList=finalAccountsList;
+        System.debug('@228-finalAccountsList1' + accWrapper.finalAccountsList);
+        System.debug('@229-orgLevelOfClaimingOrg' + accWrapper.orgLevelOfClaimingOrg);
+        return accWrapper;
+    }
+    
+    
+    private static Set < Id > setAccountIds(List < Account > accountsList) {
+        Set < Id > accountIdSet = new Set < Id > ();
+        for (Account ac: accountsList) {
+            accountIdSet.add(ac.Id);
+        }
+        return accountIdSet;
+    }
+    // recordTypeId =:FORSHARINGRECORDTYPEID added as part of CRM-9903
+    // CORE_Organization_CompanyID__c added in query as part of CRM-9905
+    private static Map < string, Account_Organization_Relationship__c > setAORMap(Set < ID > accountIdSet, string currentUserOrgId) {
+        Map < string, Account_Organization_Relationship__c > accountOrgRelMap = new Map < string, Account_Organization_Relationship__c > ();
+
+        for (Account_Organization_Relationship__c aor: [SELECT CORE_Account__c FROM Account_Organization_Relationship__c
+                WHERE CORE_Account__c IN: accountIdSet AND CORE_Organization__r.CORE_CompanyId__c =: currentUserOrgId LIMIT 50000
+            ]) {
+            accountOrgRelMap.put(aor.CORE_Account__c, aor);
+        }
+        return accountOrgRelMap;
+    }
+    private static List < Account > filterAccBasedOnAORRecords(List < Account > accountsList, Map < string, Account_Organization_Relationship__c > accOrgRelMap) {
+        List < Account > finalAccountsList = new List < Account > ();
+
+        for (Account ac1: accountsList) {
+            if (accOrgRelMap.containsKey(ac1.Id)) {
+                finalAccountsList.add(ac1);
+            }
+        }
+        return finalAccountsList;
+    }
+    /* set  search condition values based upon field values */
+    private static Boolean setSearchConditions(Account acc, List < string > conditions,User_Organization_Relationship__c uorObj) {
+
+        Boolean isRun = true;
+        string orgCompanyId='';
+        string GCID;
+        String orgmoc=acc.CORE_Claiming_Organization__r.Organization_MOC__c;
+        if (String.isNotBlank(acc.PersonEmail)) {
+            conditions.add('PersonEmail =' + '\'' + acc.PersonEmail + '\'');
+        } else if (String.isNotBlank(acc.PersonHomePhone) ||
+                   String.isNotBlank(acc.PersonMobilePhone)) {
+                       
+                       setPhoneOrHomeNumber(acc, Conditions);
+                       
+                   } else if (String.isNotBlank(acc.FirstName) &&
+                              String.isNotBlank(acc.LastName) &&
+                              String.isNotBlank(acc.PersonMailingCity)) {
+                                  Set < Integer > externalAccIds = new Set < Integer > ();
+                                  /*if(uorObj.Organization_MOC__c != NULL && marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_68').contains(uorObj.Organization_MOC__c)){
+                                      orgCompanyId=System.Label.CORE_MOCSWE_GC;
+                                  }*/
+                                  string checkPoint68 ='Account_AC_Gen_Check_Point_68';
+                  if(uorObj.Organization_MOC__c != NULL && marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_68').contains(uorObj.Organization_MOC__c)){
+                    GCID = populateMarketProfileSettingMap(checkPoint68, uorObj.Organization_MOC__c);
+                      orgCompanyId=GCID;
+                    
+					}
+                                  else{
+                                      orgCompanyId = [SELECT CORE_Organization__r.CORE_CompanyId__c, Organization_MOC__c FROM User_Organization_Relationship__c where Id =: acc.CORE_Claiming_Organization__c LIMIT 1][0].CORE_Organization__r.CORE_CompanyId__c;
+                                  }
+                                  If(System.Label.Core_OrgEnvType=='Integrated')
+                                  {
+                                  externalAccIds = CORE_AccountSearchCallout.getAccountResponseFromDILService(acc, orgCompanyId,uorObj);
+                                  
+                                  string inValues = '(';
+                                  If(externalAccIds.size() > 0) {
+                                      Integer size = externalAccIds.size();
+                                      Integer i = 1;
+                                      for(Integer id : externalAccIds){
+                                          
+                                          inValues += '\''+ id + '\'';
+                                          if(size != i){
+                                              system.debug('i value'+ i);
+                                              
+                                              inValues += ' , ';
+                                          }
+                                          
+                                          ++i;
+                                      }
+                                      inValues += ')';
+                                      conditions.add('CORE_CDMUCID__c IN  '+ inValues);
+                                  }
+                                      else {
+                                      isRun = false;
+                                  }
+                                 
+                                   
+                                  
+                              }
+                               else if(System.Label.Core_OrgEnvType=='Standalone')
+                                  {
+                                      system.debug('Inside last internal serach');
+                                            conditions.add('( FirstName =' + '\'' + acc.FirstName +
+                                                '\' AND LastName =' + '\'' + acc.LastName +
+                                             '\' AND  PersonMailingCity =' + '\'' + acc.PersonMailingCity + '\' )');
+                                                                        
+                                      
+                                  }
+                                  
+                                  
+                              }
+        
+        return isRun;
+    }
+    private static Boolean setCompSearchConditions(Account acc, List < string > conditions,User_Organization_Relationship__c uorObj) {
+        
+        Boolean isRun = true;
+        
+        if (String.isNotBlank(acc.CORE_E_mail__c)) {
+            conditions.add('CORE_E_mail__c =' + '\'' + acc.CORE_E_mail__c + '\'');
+        } else if (String.isNotBlank(acc.Phone)){
+            conditions.add('Phone =' + '\'' + acc.Phone + '\'');
+            
+        } 
+        
+        else if (String.isNotBlank(acc.Name) &&            
+                   String.isNotBlank(acc.ShippingCity)) {
+                       conditions.add('Name =' + '\'' + acc.Name + '\'');
+                       conditions.add('ShippingCity =' + '\'' + acc.ShippingCity + '\'');
+                   }
+        else {
+            isRun = false;
+        } 
+        return isRun;
+    }
+    
+    private static void setPhoneOrHomeNumber(Account acc, List < String > conditions) {
+
+        if (String.isNotBlank(acc.PersonHomePhone) &&
+            String.isNotBlank(acc.PersonMobilePhone)) {
+
+            conditions.add('( PersonMobilePhone =' + '\'' + acc.PersonMobilePhone +
+                '\' OR PersonHomePhone =' + '\'' + acc.PersonMobilePhone +
+                '\' OR  PersonMobilePhone =' + '\'' + acc.PersonHomePhone +
+                '\' OR PersonHomePhone =' + '\'' + acc.PersonHomePhone + '\' )');
+        } else {
+            string num = String.isNotBlank(acc.PersonMobilePhone) ? acc.PersonMobilePhone : acc.PersonHomePhone;
+            conditions.add('( PersonMobilePhone =' + '\'' + num +
+                '\' OR PersonHomePhone =' + '\'' + num + '\')');
+        }
+    }
+    /*11/US 3369 Update case or lead record with Account ID 
+*/
+    @AuraEnabled
+    public static void updateRecordWithAccId(Id accId,Id caseOrLeadId){
+
+        String objectName = String.valueOf(caseOrLeadId.getsobjecttype());
+        System.debug('object is '+ caseOrLeadId.getsobjecttype());
+        try{
+        if(objectName == System.Label.CORE_Case){
+            
+            List<Case> caseList =  new List<Case>();
+            for(case cse : [SELECT Id, AccountId FROM Case where id =: caseOrLeadId]){
+                cse.AccountId = accId;
+                caseList.add(cse);
+            }
+            system.debug('updated record case'+ caseList);
+            update caseList;
+            
+        }else if (objectName == System.Label.CORE_Opportunity){
+            
+            List<Opportunity> oppList =  new List<Opportunity>();
+            for(Opportunity opp : [SELECT Id, AccountId FROM Opportunity where id =: caseOrLeadId]){
+                opp.AccountId = accId;
+                oppList.add(opp);
+            }
+            
+            update oppList;
+             system.debug('updated record oppList'+ oppList);
+        }
+            
+        }
+        catch (DmlException de) {
+        throw new AuraHandledException(de.getDmlMessage(0));          
+            
+        }
+        
+    }
+    @AuraEnabled
+    public static void updateCaseWithNewAccount(Id caseOrLeadId, Account account){
+        
+        try{
+           insert account;
+           updateRecordWithAccId(account.Id,caseOrLeadId);
+            
+        }catch(Exception ex){
+           system.debug('exception is '+ex.getMessage());
+             UTIL_LoggingService.logHandledException(ex, UserInfo.getOrganizationId(),UserInfo.getOrganizationName(),'AccountRecordTypeController','updateCaseWithNewAccount','AccountRecordTypeController', system.LoggingLevel.FINEST);
+            
+        }
+        
+    }  
+    
+    @AuraEnabled
+    public static void performAction(string accID, String claimingOrganization) {
+        
+        String currentUserID= UserInfo.getUserId();
+        User_Organization_Relationship__c uorObj = [SELECT CORE_Organization__c,CORE_User__c, CORE_Organization__r.Core_Sharing_Level_ID__c
+                                                    from User_Organization_Relationship__c
+                                                    WHERE id =:claimingOrganization LIMIT 1 ];
+        
+        
+        System.Debug('uorObj' + uorObj);
+        
+        //To store Sharing Level ID
+        String sharingLevelId;
+        // To store Organization from Claiming Org
+        ID org; 
+        List<Id>  hadAccessAccounts = CustomSearchWithSharingController.accIdsWithSharing(accID);
+        
+        //If user is not having access to Account, will go through this if and gets the access
+        if(! hadAccessAccounts.contains(accID) ){
+            
+            sharingLevelId= uorObj.CORE_Organization__r.Core_Sharing_Level_ID__c.replace('.','_');
+            System.debug('sharingLevelId-317'+sharingLevelId);
+            org = uorObj.CORE_Organization__c;
+            
+            //Get the Public group id based on Sharing level Id of Claiming Org
+            String groupName =  sharingLevelId + '_Public_Group';
+            Group grp = [Select ID from Group where developername =: groupName LIMIT 1];
+            System.debug('grp' + grp);
+            
+            
+            // To create Account Share
+            performAccountShare(accID , grp.id); 
+            
+            // To add AOR,LOR, COR
+            addAccOrgRec( accId , currentUserID, org);
+            createCORandCaseShare(accId, grp.id, currentUserID, org);
+            createOpportunityChildShare(accId, grp.id, currentUserID, org);
+            createStdLeadChildShare(accId, grp.id, currentUserID, org);
+            
+        }  
+        
+        
+    }
+    
+        /* add this record to account org relation object where accid will be account id to which we are providing access, 
+org id will be User's Retailer Account and User will be search performed user */
+    @future
+    private static void addAccOrgRec(Id accId, String currentUserID, String org){
+        List<Account_Organization_Relationship__c> aorToBeInserted = new List<Account_Organization_Relationship__c>();    
+            Account_Organization_Relationship__c accOrgRec = new Account_Organization_Relationship__c(); 
+            accOrgRec.CORE_User__c = currentUserID;
+            accOrgRec.CORE_Account__c =   accId;  
+            accOrgRec.CORE_Organization__c =  org;
+            accOrgRec.recordtypeid=FORSHARINGRECORDTYPEID;// added as part of CRM-9903
+            aorToBeInserted.add(AccOrgRec);
+        
+        
+        try{
+            if(aorToBeInserted!=null && aorToBeInserted.size()>0)
+            {
+                Map<Id,Id> accountWithEcosystemUserMap=UtilityClass.getAccountWithEcosystemUser(aorToBeInserted);
+                for(Account_Organization_Relationship__c aorObj:aorToBeInserted)
+                {
+                    if(aorObj.Id==null)
+                    {
+                        aorObj.ownerId=accountWithEcosystemUserMap.get(accId);
+
+                    }                
+                }
+                
+               Database.Upsert(aorToBeInserted,false);
+
+            }
+            
+        }
+        catch(Exception e){
+            UTIL_LoggingService.logHandledException(e, UserInfo.getOrganizationId(),UserInfo.getOrganizationName(),'AccountSearchController','addAccOrgRec','AccountSearchController', system.LoggingLevel.FINEST);
+        }
+    }
+    
+    // perform account share with current user organsition Account publicgroup (in real time)
+    @AuraEnabled
+    public static void performAccountShare(string accID, Id publicGrpId) {
+        
+        List<AccountShare> sharesToCreate = new List<AccountShare>();
+        
+        AccountShare aShare = new AccountShare();
+        aShare.AccountId = accID ;
+        aShare.UserOrGroupId = publicGrpId;
+        aShare.AccountAccessLevel = 'Edit';
+        aShare.OpportunityAccessLevel = 'None';
+        aShare.CaseAccessLevel= 'None';
+        sharesToCreate.add(aShare);   
+                
+      
+        if(!sharesToCreate.isEmpty()){
+            try{
+                Database.upsert(sharesToCreate,false);
+            }
+            catch(Exception e){
+                UTIL_LoggingService.logHandledException(e, UserInfo.getOrganizationId(),UserInfo.getOrganizationName(),'AccountSearchController','performAccountShare','AccountSearchController', system.LoggingLevel.FINEST);
+            }
+        }
+    }  
+    
+    
+    @future
+    private static void createCORandCaseShare(String accId, Id publicGrpId, String currentUserID , String org){
+        
+        Set<Id> setOfAllAccountsToBeShared = new Set<Id>();
+        Set<Id> setOfPersonAcctIds = new Set<Id>();
+        Set<Id> setOfCompanyAcctIds = new Set<Id>();
+        Map<String,Company_Person_Relationship__c> mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR = new Map<String,Company_Person_Relationship__c>();
+        List<String> lstOfConcatOfPersonAcctIdCmpyAcctId = new List<String>();
+        String tempStr;
+		//11335-end
+		
+        AccountWrapper wrapperForCaseSharing = new AccountWrapper();
+        string marketName = marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_70');//moc swe,moc at
+		List<string> allowedMarketsList = new list<string>();//used this variable to remove the initial spaces        
+        List<string> marketList = marketName.split(',');
+        for(string market : marketList){
+            market=market.normalizeSpace();
+            allowedMarketsList.add(market);
+        }
+        for(Case c: [SELECT Id, AccountId,CORE_Is_Shared_With_BDC__c,Core_Company_Account__c,Core_Contact_Person__c,
+                     Core_Contact_Person__r.Core_Contact__c
+                     FROM Case 
+                     WHERE accountId= :accId  AND (CORE_Is_Shared_With_BDC__c = true OR
+                                                   Account.Core_Market_Profile_Setting__r.Name IN : allowedMarketsList) limit 50000]){
+                         
+                         if(c.Core_Company_Account__c != null){
+                             setOfAllAccountsToBeShared.add(c.Core_Company_Account__c);   
+                             
+                             //11335 - CPR share
+                             if(c.Core_Contact_Person__c == null){
+                                 tempStr = c.AccountId + '_' + c.Core_Company_Account__c;
+                                 lstOfConcatOfPersonAcctIdCmpyAcctId.add(tempStr);
+                             }
+                             else{
+                                 Company_Person_Relationship__Share cprShareObj = new Company_Person_Relationship__Share();
+                                 cprShareObj.ParentId = c.Core_Contact_Person__c;
+                                 cprShareObj.UserOrGroupId  = publicGrpId;
+                                 cprShareObj.AccessLevel = 'Edit';
+                                 wrapperForCaseSharing.cprShareList.add(cprShareObj) ;
+                                 
+                                 //11335- if Person Account is different from Person Account of CPR on Case
+                                 if(c.AccountId != c.Core_Contact_Person__r.Core_Contact__c){
+                                     setOfAllAccountsToBeShared.add(c.Core_Contact_Person__r.Core_Contact__c);
+                                     setOfPersonAcctIds.add(c.Core_Contact_Person__r.Core_Contact__c);
+                                     setOfCompanyAcctIds.add(c.Core_Company_Account__c);
+                                     tempStr = c.AccountId + '_' + c.Core_Company_Account__c;
+                                     lstOfConcatOfPersonAcctIdCmpyAcctId.add(tempStr);
+                                 }//11335 end
+                             }
+                         }
+                         
+                         // Case Share
+                         CaseShare caseShareObj = new CaseShare();
+                         caseShareObj.CaseAccessLevel = 'Edit';
+                         caseShareObj.CaseId = c.Id;
+                         caseShareObj.UserOrGroupId = publicGrpId;
+                         caseShareObj.RowCause='Manual';
+                         wrapperForCaseSharing.caseShareList.add(caseShareObj);
+                         
+                         Case_Organization_Relationship__c caseOrgRecordsObj=new Case_Organization_Relationship__c();
+                         caseOrgRecordsObj.CORE_Organization__c= org;
+                         caseOrgRecordsObj.CORE_Case__c = c.Id;
+                         caseOrgRecordsObj.CORE_User__c = currentUserID;
+                         wrapperForCaseSharing.listOfCORs.add(caseOrgRecordsObj);
+                                  
+                         
+                     }
+        //11335-start
+        if(setOfPersonAcctIds.size() > 0 && setOfCompanyAcctIds.size() > 0)
+        {
+            mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR = getCPRDetails(setOfPersonAcctIds,setOfCompanyAcctIds);
+        }
+        
+        for(String cprConcatinationName: lstOfConcatOfPersonAcctIdCmpyAcctId){
+            if(mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR.containsKey(cprConcatinationName) ){
+                //11335 - CPR share --CPR which links company account with person account of opportunity/case 
+                Company_Person_Relationship__Share cprShareObj = new Company_Person_Relationship__Share();
+                cprShareObj.ParentId = mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR.get(cprConcatinationName).Id ;
+                cprShareObj.UserOrGroupId  = publicGrpId;
+                cprShareObj.AccessLevel = 'Edit';
+                wrapperForCaseSharing.cprShareList.add(cprShareObj) ;
+            }//11335-end
+            
+        }
+        
+        for(Id accountToBeShared : setOfAllAccountsToBeShared){
+            
+            //11333- Person/Company Account - Account Share
+            AccountShare acctShareObj=new AccountShare();
+            acctShareObj.AccountId = accountToBeShared;
+            acctShareObj.AccountAccessLevel = 'Edit';
+            acctShareObj.OpportunityAccessLevel = 'None';
+            acctShareObj.CaseAccessLevel = 'None';
+            acctShareObj.UserOrGroupId = publicGrpId;
+            acctShareObj.RowCause='Manual';
+            wrapperForCaseSharing.accShareList.add(acctShareObj);
+            UtilityClass.buildAccOrgRelationList(accountToBeShared,org,wrapperForCaseSharing.listOfAORs);
+            
+        }
+        
+        insertRecords(wrapperForCaseSharing);
+        
+        
+       
+        
+    }
+    
+    @future
+    private static void createOpportunityChildShare(String accId,  Id publicGrpId, String currentUserID, String org){
+       
+        Set<Id> setOfAllAccountsToBeShared = new Set<Id>();
+        Set<Id> setOfPersonAcctIds = new Set<Id>();
+        Set<Id> setOfCompanyAcctIds = new Set<Id>();
+        
+        Map<String,Company_Person_Relationship__c> mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR = new Map<String,Company_Person_Relationship__c>();
+        List<String> lstOfConcatOfPersonAcctIdCmpyAcctId = new List<String>();
+        String tempStr;
+        
+        AccountWrapper wrapperForOppSharing = new AccountWrapper();
+        string marketName = marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_71');//moc swe,moc at
+		List<string> allowedMarketsList = new list<string>();//used this variable to remove the initial spaces        
+        List<string> marketList = marketName.split(',');
+        for(string market : marketList){
+           market=market.normalizeSpace();
+            allowedMarketsList.add(market);
+        }
+        for(Opportunity opp: [SELECT Id, AccountId, CORE_Is_Shared_With_BDC__c, Core_Company_Account__c,Core_Contact_Person__c,
+                              Core_Contact_Person__r.Core_Contact__c,
+                              (select Core_Financing_Partner__c from Order_Informations__r),
+                              (select Core_Financing_Partner__c from Offer_Informations__r)
+                              FROM Opportunity 
+                              WHERE accountId= :accId AND (CORE_Is_Shared_With_BDC__c = true OR Account.Core_Market_Profile_Setting__r.Name IN : allowedMarketsList) LIMIT 50000  ]){
+                                  
+                                  //11333
+                                  for(Offer_Information__c offer : opp.Offer_Informations__r){
+                                      setOfAllAccountsToBeShared.add(offer.Core_Financing_Partner__c);   
+                                  }
+                                  
+                                  for(Order_Information__c order : opp.Order_Informations__r){
+                                      setOfAllAccountsToBeShared.add(order.Core_Financing_Partner__c);   
+                                  }
+                                  
+                                  //11333 - Company Account Share 
+                                  if(opp.Core_Company_Account__c != null){
+                                      setOfAllAccountsToBeShared.add(opp.Core_Company_Account__c);   
+                                      
+                                      // CPR Share
+                                      if(opp.Core_Contact_Person__c == null){
+                                          tempStr = opp.AccountId + '_' + opp.Core_Company_Account__c;
+                                          lstOfConcatOfPersonAcctIdCmpyAcctId.add(tempStr);
+                                      }
+                                      
+                                      else{
+                                          Company_Person_Relationship__Share cprShareObj = new Company_Person_Relationship__Share();
+                                          cprShareObj.ParentId = opp.Core_Contact_Person__c;
+                                          cprShareObj.UserOrGroupId  = publicGrpId;
+                                          cprShareObj.AccessLevel = 'Edit';
+                                          wrapperForOppSharing.cprShareList.add(cprShareObj) ;
+                                          
+                                          //11333- if Person Account is different from Person Account of CPR on Opportunity
+                                          if(opp.AccountId != opp.Core_Contact_Person__r.Core_Contact__c){
+                                              setOfAllAccountsToBeShared.add(opp.Core_Contact_Person__r.Core_Contact__c);
+                                              setOfPersonAcctIds.add(opp.Core_Contact_Person__r.Core_Contact__c);
+                                              setOfCompanyAcctIds.add(opp.Core_Company_Account__c);
+                                              tempStr = opp.AccountId + '_' + opp.Core_Company_Account__c;
+                                              lstOfConcatOfPersonAcctIdCmpyAcctId.add(tempStr);
+                                          }        
+                                      }
+                                  }
+                                  
+                                  //Opportunity Share
+                                  OpportunityShare oppShareObj=new OpportunityShare();
+                                  oppShareObj.OpportunityAccessLevel='Edit';
+                                  oppShareObj.OpportunityId=opp.Id;
+                                  oppShareObj.UserOrGroupId= publicGrpId;
+                                  oppShareObj.RowCause='Manual';
+                                  wrapperForOppSharing.oppShareList.add(oppShareObj);
+                                  
+                                  //LOR records
+                                  Lead_Organization_Relationship__c leadOrgRecordsObj=new Lead_Organization_Relationship__c();
+                                  leadOrgRecordsObj.CORE_Organization__c= org;
+                                  leadOrgRecordsObj.CORE_Lead__c = opp.Id;
+                                  leadOrgRecordsObj.CORE_User__c = currentUserID;
+								  leadOrgRecordsObj.CORE_ChildSharingStatus__c = System.Label.CORE_Status_Queued;
+                                  wrapperForOppSharing.listOfLORs.add(leadOrgRecordsObj);
+                              }
+        
+        if(setOfPersonAcctIds.size() > 0 && setOfCompanyAcctIds.size() > 0 ){
+            mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR = getCPRDetails(setOfPersonAcctIds,setOfCompanyAcctIds);
+        }
+        
+         for(String cprConcatinationName: lstOfConcatOfPersonAcctIdCmpyAcctId){
+            if(mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR.containsKey(cprConcatinationName) ){
+                //11333 - CPR share --CPR which links company account with person account of opportunity/case 
+                Company_Person_Relationship__Share cprShareObj = new Company_Person_Relationship__Share();
+                cprShareObj.ParentId = mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR.get(cprConcatinationName).Id ;
+                cprShareObj.UserOrGroupId  = publicGrpId;
+                cprShareObj.AccessLevel = 'Edit';
+                wrapperForOppSharing.cprShareList.add(cprShareObj) ;
+            }
+        }
+        
+        
+        for(Id accountToBeShared : setOfAllAccountsToBeShared){
+            
+            //11333- Person/Company Account - Account Share1
+            AccountShare financeAcctShareObj=new AccountShare();
+            financeAcctShareObj.AccountId = accountToBeShared;
+            financeAcctShareObj.AccountAccessLevel = 'Edit';
+            financeAcctShareObj.OpportunityAccessLevel = 'None';
+            financeAcctShareObj.CaseAccessLevel = 'None';
+            financeAcctShareObj.UserOrGroupId = publicGrpId;
+            financeAcctShareObj.RowCause='Manual';
+            wrapperForOppSharing.accShareList.add(financeAcctShareObj);
+            
+            //11333- Finance Partner Account - AOR records
+            UtilityClass.buildAccOrgRelationList(accountToBeShared,org,wrapperForOppSharing.listOfAORs);
+            
+        }
+        
+        insertRecords(wrapperForOppSharing);
+        
+    }
+    
+    @future
+    private static void createStdLeadChildShare(String accId,  Id publicGrpId, String currentUserID, String org){
+        
+        Set<Id> setOfAllAccountsToBeShared = new Set<Id>();
+        Set<Id> setOfPersonAcctIds = new Set<Id>();
+        Set<Id> setOfCompanyAcctIds = new Set<Id>();
+        
+        Map<String,Company_Person_Relationship__c> mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR = new Map<String,Company_Person_Relationship__c>();
+        List<String> lstOfConcatOfPersonAcctIdCmpyAcctId = new List<String>();
+        String tempStr;
+        AccountWrapper wrapperForLeadSharing = new AccountWrapper();
+        string marketName = marketLevelCheckPointToAllowedMarketMap.get('Account_AC_Gen_Check_Point_72');//moc swe,moc at
+		List<string> allowedMarketsList = new list<string>();//used this variable to remove the initial spaces        
+        List<string> marketList = marketName.split(',');
+        for(string market : marketList){
+            market=market.normalizeSpace();
+            allowedMarketsList.add(market);
+        }
+        for(Lead ld:[Select ID,Core_Account__c,Core_Company__c,Core_Contact_Person__c,Core_Contact_Person__r.Core_Contact__c,Core_Account__r.Core_Market_Profile_Setting__r.Name  from Lead where (Core_Account__c=:accId AND Core_Account__r.Core_Market_Profile_Setting__r.Name IN : allowedMarketsList) ]){
+            if(ld.Core_Company__c != null){
+                setOfAllAccountsToBeShared.add(ld.Core_Company__c) ;
+                if(ld.Core_Contact_Person__c == null){
+                    tempStr = ld.Core_Account__c + '_' + ld.Core_Company__c;
+                    lstOfConcatOfPersonAcctIdCmpyAcctId.add(tempStr);
+                }	
+                else{
+                    Company_Person_Relationship__Share cprShareObj = new Company_Person_Relationship__Share();
+                    cprShareObj.ParentId = ld.Core_Contact_Person__c;
+                    cprShareObj.UserOrGroupId  = publicGrpId;
+                    cprShareObj.AccessLevel = 'Edit';
+                    wrapperForLeadSharing.cprShareList.add(cprShareObj) ;
+                    
+                    //11333- if Person Account is different from Person Account of CPR on Opportunity
+                    if(ld.Core_Account__c != ld.Core_Contact_Person__r.Core_Contact__c){
+                        setOfAllAccountsToBeShared.add(ld.Core_Contact_Person__r.Core_Contact__c);
+                        setOfPersonAcctIds.add(ld.Core_Contact_Person__r.Core_Contact__c);
+                        setOfCompanyAcctIds.add(ld.Core_Company__c);
+                        tempStr = ld.Core_Account__c + '_' + ld.Core_Company__c;
+                        lstOfConcatOfPersonAcctIdCmpyAcctId.add(tempStr);
+                    }        
+                }									  
+            }
+            
+            LeadShare leadShareObj = new LeadShare();
+            leadShareObj.LeadAccessLevel = 'Edit';
+            leadShareObj.LeadId = ld.Id;
+            leadShareObj.UserOrGroupId = publicGrpId;
+            leadShareObj.RowCause='Manual';
+            wrapperForLeadSharing.leadsharelist.add(leadShareObj);
+            
+            Standard_lead_org_relationship__c stdleadOrgRecordsObj=new Standard_lead_org_relationship__c();
+            stdleadOrgRecordsObj.CORE_Organization__c= org;
+            stdleadOrgRecordsObj.CORE_Lead__c = ld.Id;
+            stdleadOrgRecordsObj.CORE_User__c = currentUserID;
+            stdleadOrgRecordsObj.CORE_Child_Sharing_Status__c = System.Label.CORE_Status_Queued;
+            wrapperForLeadSharing.stlleadlor.add(stdleadOrgRecordsObj);
+            if(setOfPersonAcctIds.size() > 0 && setOfCompanyAcctIds.size() > 0 ){
+                mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR = getCPRDetails(setOfPersonAcctIds,setOfCompanyAcctIds);
+            }
+            
+            for(String cprConcatinationName: lstOfConcatOfPersonAcctIdCmpyAcctId){
+                if(mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR.containsKey(cprConcatinationName) ){
+                    //11333 - CPR share --CPR which links company account with person account of opportunity/case 
+                    Company_Person_Relationship__Share cprShareObj = new Company_Person_Relationship__Share();
+                    cprShareObj.ParentId = mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR.get(cprConcatinationName).Id ;
+                    cprShareObj.UserOrGroupId  = publicGrpId;
+                    cprShareObj.AccessLevel = 'Edit';
+                    wrapperForLeadSharing.cprShareList.add(cprShareObj) ;
+                }
+            }
+            for(Id accountToBeShared : setOfAllAccountsToBeShared){
+                
+                //11333- Person/Company Account - Account Share1
+                AccountShare acctShareObj=new AccountShare();
+                acctShareObj.AccountId = accountToBeShared;
+                acctShareObj.AccountAccessLevel = 'Edit';
+                acctShareObj.OpportunityAccessLevel = 'None';
+                acctShareObj.CaseAccessLevel = 'None';
+                acctShareObj.UserOrGroupId = publicGrpId;
+                acctShareObj.RowCause='Manual';
+                wrapperForLeadSharing.accShareList.add(acctShareObj);
+                
+                
+            }
+        }
+        
+        insertRecords(wrapperForLeadSharing);
+    }
+    private static Map<String,Company_Person_Relationship__c> getCPRDetails(Set<Id> personAccountIds, Set<Id> companyAccountIds){
+        Map<String,Company_Person_Relationship__c> mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR = new Map<String,Company_Person_Relationship__c>();
+        String tempMapKey ;
+        for(Company_Person_Relationship__c cpr : [SELECT id,Core_Contact__c,Core_Account__c from Company_Person_Relationship__c 
+                                                  WHERE Core_Contact__c IN : personAccountIds
+                                                  AND Core_Account__c IN : companyAccountIds LIMIT 50000]){
+                                                      tempMapKey = cpr.Core_Contact__c + '_' + cpr.Core_Account__c;
+                                                      mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR.put(tempMapKey, cpr);
+                                                  }
+        
+        return mapOfCprPersonAcctIdPlusCmpnyAcctIdWithCPR;
+    }
+    
+    private static void insertRecords(AccountWrapper wrapper){
+        try{
+            if(wrapper.listOfCORs.size() > 0){
+                Database.upsert(wrapper.listOfCORs,false);
+            }
+            if(wrapper.caseShareList.size() > 0){
+                Database.upsert(wrapper.caseShareList,false);
+            }    
+            if(wrapper.listOfLORs.size() > 0){
+                Database.upsert(wrapper.listOfLORs,false);
+            }
+            if(wrapper.oppShareList.size() > 0){
+                Database.upsert(wrapper.oppShareList,false);
+            }    
+            if(wrapper.accShareList.size() > 0){
+                Database.upsert(wrapper.accShareList,false);
+            }
+            if(wrapper.listOfAORs.size() > 0){
+                Database.upsert(wrapper.listOfAORs,false);
+            }
+            if(wrapper.cprShareList.size() > 0){
+                Database.upsert(wrapper.cprShareList,false);
+            }
+            if(wrapper.leadsharelist.size() > 0){
+                system.debug('inside lead sh insert');
+                Database.upsert(wrapper.leadsharelist,false);
+            }
+            if(wrapper.stlleadlor.size() > 0){
+                system.debug('inside lead lor insert');
+                Database.upsert(wrapper.stlleadlor,false);
+            }
+            
+        }
+        catch(Exception e){
+            UTIL_LoggingService.logHandledException(e, UserInfo.getOrganizationId(),UserInfo.getOrganizationName(),'AccountRecordTypeController','createLORandLeadShare','AccountRecordTypeController', system.LoggingLevel.FINEST);
+            
+        }
+
+        
+    }
+    public static string populateMarketProfileSettingMap (string mname, string MOC){
+        Map <string,string> marketMaps = new Map <string,string>();
+        string companyID;
+        if(marketLevelCheckPointToAllowedMarketMap.get(mname).contains(MOC)){
+            
+            return [SELECT CORE_MOC_CompanyId__c FROM Market_Profile_Setting__c where Name =:MOC].CORE_MOC_CompanyId__c;
+        }
+       
+        return null;
+    }
+    
+    public class AccountWrapper {
+        @AuraEnabled public List<Account> finalAccountsList;
+        @AuraEnabled public String orgLevelOfClaimingOrg;
+        @AuraEnabled public String mpsofacc;
+        public List<Account_Organization_Relationship__c> listOfAORs = new List<Account_Organization_Relationship__c>();
+        public List<AccountShare> accShareList = new List<AccountShare>();
+        public List<Company_Person_Relationship__Share> cprShareList = new List<Company_Person_Relationship__Share>();
+        public List<Lead_Organization_Relationship__c> listOfLORs = new List<Lead_Organization_Relationship__c>();
+        public List<OpportunityShare> oppShareList= new List<OpportunityShare>();
+        public List<CaseShare> caseShareList= new List<CaseShare>();
+        public List<Case_Organization_Relationship__c> listOfCORs = new List<Case_Organization_Relationship__c>();
+        public List<LeadShare> leadsharelist=new List<LeadShare>();
+        public List<Standard_lead_org_relationship__c> stlleadlor=new List<Standard_lead_org_relationship__c> ();
+    }
+}
